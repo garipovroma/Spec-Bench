@@ -1,17 +1,13 @@
 import torch
 import time
 
-class ExperimentStats:
+class BatchStats:
     """
     Statistics of one generation function call of speculative decoding method
     """
-    def __init__(self, drafter_name, verifier_name, method_name):
-        self.experiment_config = {
-            "drafter_name": drafter_name, 
-            "verifier_name": verifier_name,
-            "method_name": method_name,
-        }
-        self.accepted_length = torch.empty(0)
+    def __init__(self, batch_size, accepted_length=None):
+        if accepted_length is None:
+            self.accepted_length = torch.empty((batch_size, 0))
         self.start_time = None
         self.end_time = None
         self.wall_time = None
@@ -29,7 +25,7 @@ class ExperimentStats:
         self.wall_time = self.start_time - self.end_time
     
     def add_accept(self, accepts: torch.tensor):
-        self.accepted_length = torch.cat([self.accepted_length, accepts], dim=0)
+        self.accepted_length = torch.cat([self.accepted_length.to(device=accepts.device), accepts], dim=-1)
     
     def calculate_stats(self):
         self.steps = self.accepted_length.shape[0]
@@ -38,6 +34,9 @@ class ExperimentStats:
     
     def calculate_finished(self, ids, eos_id):
         self.finished = torch.any(ids == eos_id, dim=-1)
+
+    def get_new_tokens(self):
+        return self.accepted_length.sum(-1)
 
     def __call__(self, *args, **kwds):
         self.calculate_stats()

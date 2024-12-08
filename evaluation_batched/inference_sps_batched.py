@@ -132,13 +132,14 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     
-    if tokenizer.pad_token is None:
-        pad_token = "[PAD]"
-        tokenizer.add_special_tokens({'pad_token': pad_token})
-        model.resize_token_embeddings(len(tokenizer))
-        drafter.resize_token_embeddings(len(tokenizer))
-    else:
-        pad_token = tokenizer.pad_token
+    if tokenizer.pad_token_id is None:
+        assert model.generation_config.pad_token_id != model.generation_config.eos_token_id
+        tokenizer.pad_token_id = model.generation_config.pad_token_id
+
+        # pad_token = "[PAD]"
+        # tokenizer.add_special_tokens({'pad_token': pad_token})
+        # model.resize_token_embeddings(len(tokenizer))
+        # drafter.resize_token_embeddings(len(tokenizer))
         
     model.eval()
     drafter.eval()
