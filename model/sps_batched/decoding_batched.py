@@ -1,14 +1,7 @@
 import torch
 from ..utils.statistics import BatchStats
+from ..utils.generation_utils import temperature_scaled_softmax, squeeze_pads
 
-def temperature_scaled_softmax(logits, temperature=1.0, dim=0):
-    assert not logits.isnan().any()
-    if temperature > 0:
-        res = torch.softmax(logits / temperature, dim=dim)
-    else:
-        max_logits = torch.max(logits, dim=dim, keepdim=True)[0]
-        res = logits.ge(max_logits).to(dtype=logits.dtype)
-    return res
 
 @torch.no_grad()
 def sps_batched_generate(
@@ -27,7 +20,7 @@ def sps_batched_generate(
     bs = input_ids.shape[0]
     stats = BatchStats(batch_size=bs)
     stats.set_timer()
-    is_finished = torch.zeros(bs, dtype=torch.bool)
+    is_finished = torch.zeros(bs, dtype=torch.bool, device=input_ids.device)
 
     for i in range(max_steps):
         generated_step = sps_batched_one_forward(
@@ -46,6 +39,10 @@ def sps_batched_generate(
         attention_mask = generated_step["attention_mask"]
         is_finished = generated_step["is_finished"]
         stats.add_accept(generated_step["verified"].reshape(-1, 1))
+
+        need_to_squeeze = i % 20
+        if need_to_squeeze:
+            input_ids, attention_mask = squeeze_pads(input_ids, attention_mask, model.generation_config.pad_token_id)
 
         if (is_finished.sum() == bs):
             break
@@ -70,29 +67,29 @@ def sps_batched_one_forward(
     is_finished=None,
 ):
     bs = input_ids.shape[0]
+    device = input_ids.device
     if is_finished is None:
-        is_finished = torch.zeros(bs, dtype=torch.bool)
-    max_matches = drafted_tokens + 1
+        is_finished = torch.zeros(bs, dtype=torch.bool, device=device)
+    max_matches = (torch.ones(bs, device=device, dtype=torch.long) * drafted_tokens + 1) * ~is_finished
 
     drafted = generate_with_pad(input_ids, attention_mask, drafter, do_sample, temperature, drafted_tokens, stop_on_eos=False)
-    candidate_input_ids = torch.cat([drafted["sequences"], torch.zeros(bs, 1, dtype=torch.long, device=drafted["sequences"].device)], 1)
-    candidate_logits = torch.cat([drafted["scores"][:, -drafted_tokens:], torch.zeros(bs, 1, drafted["scores"].shape[2], device=drafted["scores"].device)], 1)
-    verifier_attention_mask=torch.cat([attention_mask, torch.ones((bs, drafted_tokens), device=attention_mask.device)], 1)
+    candidate_input_ids = torch.cat([drafted["sequences"], torch.zeros(bs, 1, dtype=torch.long, device=device)], 1)
+    candidate_logits = torch.cat([drafted["scores"][:, -drafted_tokens:], torch.zeros(bs, 1, drafted["scores"].shape[2], device=device)], 1)
+    verifier_attention_mask=torch.cat([attention_mask, torch.ones((bs, drafted_tokens), device=device)], 1)
     
     verifier_logits = model.forward(drafted["sequences"], attention_mask=verifier_attention_mask, position_ids=make_padded_pos_ids(verifier_attention_mask))["logits"]
-    
-    new_logits = verifier_logits[:, -max_matches:]
+    new_logits = verifier_logits[:, -max_matches.max().item():]
 
     valid_tokens, n_matches = _speculative_sampling(candidate_input_ids, candidate_logits, drafted_tokens, new_logits, max_matches, do_sample, temperature)
         
-    new_attention_mask = (torch.arange(n_matches.max().item(), device=n_matches.device).repeat((bs,1)) < n_matches.reshape(bs, 1)).to(dtype=torch.long)
-    new_attention_mask = torch.cat([new_attention_mask, torch.ones(bs, 1, device=new_attention_mask.device, dtype=torch.long)], -1)
+    new_attention_mask = (torch.arange(n_matches.max().item(), device=device).repeat((bs,1)) < n_matches.reshape(bs, 1)).to(dtype=torch.long)
+    new_attention_mask = torch.cat([new_attention_mask, torch.ones(bs, 1, device=device, dtype=torch.long)], -1)
 
     valid_tokens = torch.where(new_attention_mask == 1, valid_tokens, model.generation_config.pad_token_id)
 
-    verified = (n_matches + 1) * ~is_finished.to(n_matches.device)
+    verified = (n_matches + 1) * ~is_finished
 
-    is_finished = (is_finished.to(valid_tokens.device) | (valid_tokens == model.generation_config.eos_token_id).any(-1))
+    is_finished = (is_finished | (valid_tokens == model.generation_config.eos_token_id).any(-1))
 
     return {"sequences" : torch.cat([input_ids, valid_tokens], -1),
             "attention_mask" : torch.cat([attention_mask, new_attention_mask], -1), 
@@ -143,8 +140,8 @@ def _speculative_sampling(
 ):
     batch_size = candidate_input_ids.shape[0]
     device = candidate_input_ids.device
-    
-    new_candidate_input_ids = candidate_input_ids[:, -max_matches:]
+
+    new_candidate_input_ids = candidate_input_ids[:, -max_matches.max().item():]
 
     q = temperature_scaled_softmax(candidate_logits, temperature, dim=-1)
     q_i = torch.gather(q, 2, new_candidate_input_ids[:, :, None]).squeeze(-1)
@@ -156,14 +153,14 @@ def _speculative_sampling(
     is_accepted = r_i <= probability_ratio
 
     n_matches = ((~is_accepted).cumsum(dim=-1) < 1).sum(dim=-1)
-    n_matches = torch.minimum(n_matches, torch.ones((batch_size), dtype=int).to(device) * max_matches)
+    n_matches = torch.minimum(n_matches, max_matches)
     
     p_n_plus_1 = torch.take_along_dim(p, n_matches.resize(batch_size, 1, 1), 1)
     q_n_plus_1 = torch.take_along_dim(q, n_matches.resize(batch_size, 1, 1), 1)
     p_prime = torch.clamp((p_n_plus_1 - q_n_plus_1 * (n_matches < max_matches-1).reshape(batch_size, 1, 1)), min=0).squeeze(1)
 
     new_token = torch.multinomial(p_prime, num_samples=1)
- 
+    
     if (n_matches > 0).any():
         valid_tokens = torch.cat((new_candidate_input_ids[:, :n_matches.max()], new_token), dim=-1)
     else:
