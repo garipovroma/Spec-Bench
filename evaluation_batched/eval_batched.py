@@ -16,11 +16,14 @@ from fastchat.llm_judge.common import load_questions
 from fastchat.model import get_conversation_template
 from tqdm import tqdm
 
+def chunks(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 def run_eval_batched(
         model,
         tokenizer,
-        forward_func,
+        generate_batched_func,
         model_id,
         question_file,
         question_begin,
@@ -55,7 +58,7 @@ def run_eval_batched(
             get_answers_func(
                 model,
                 tokenizer,
-                forward_func,
+                generate_batched_func,
                 model_id,
                 questions[i: i + chunk_size],
                 answer_file,
@@ -74,7 +77,7 @@ def run_eval_batched(
 def get_model_answers(
         model,
         tokenizer,
-        forward_func,
+        generate_batched_func,
         model_id,
         questions,
         answer_file,
@@ -93,25 +96,108 @@ def get_model_answers(
     question = questions[0]
 
     # warmup
-    for _ in range(3):
-        torch.manual_seed(0)
-        conv = get_conversation_template("vicuna")
+    # for _ in range(3):
+    #     torch.manual_seed(0)
+    #     conv = get_conversation_template("vicuna")
+    #     turns = []
+    #     steps = []
+    #     new_tokens = []
+    #     wall_time = []
+    #     for j in range(len(question["turns"][:5])):
+    #         qs = question["turns"][j]
+    #         conv.append_message(conv.roles[0], qs)
+    #         conv.append_message(conv.roles[1], None)
+    #         conv.stop_str = "</s>"
+    #         prompt = conv.get_prompt()
+    #         inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
+    #         input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
+    #         try:
+    #             torch.cuda.synchronize()
+    #             start_time = time.time()
+    #             output_ids, stats = generate_batched_func(
+    #                 input_ids, attention_mask,
+    #                 model,
+    #                 tokenizer,
+    #                 max_new_tokens,
+    #                 **kwargs,
+    #                 # drafter=drafter,
+    #                 # do_sample=do_sample,
+    #                 # temperature=temperature,
+    #             )
+
+    #             stats.calculate_stats()
+    #             new_token = stats.mean_accept_per_sample + stats.steps
+    #             step = stats.steps
+    #             total_time = stats.wall_time
+    #             accept_length_tree = stats.accepted_length.tolist()
+    #             accept_lengths_tree.extend(accept_length_tree)
+    #             output_ids = output_ids[0][len(input_ids[0]):]
+    #             # be consistent with the template's stop_token_ids
+    #             if conv.stop_token_ids:
+    #                 stop_token_ids_index = [
+    #                     i
+    #                     for i, id in enumerate(output_ids)
+    #                     if id in conv.stop_token_ids
+    #                 ]
+    #                 if len(stop_token_ids_index) > 0:
+    #                     output_ids = output_ids[: stop_token_ids_index[0]]
+
+    #             output = tokenizer.decode(
+    #                 output_ids,
+    #                 spaces_between_special_tokens=False,
+    #             )
+    #             if conv.stop_str and output.find(conv.stop_str) > 0:
+    #                 output = output[: output.find(conv.stop_str)]
+    #             for special_token in tokenizer.special_tokens_map.values():
+    #                 if isinstance(special_token, list):
+    #                     for special_tok in special_token:
+    #                         output = output.replace(special_tok, "")
+    #                 else:
+    #                     output = output.replace(special_token, "")
+    #             output = output.strip()
+
+    #             if conv.name == "xgen" and output.startswith("Assistant:"):
+    #                 output = output.replace("Assistant:", "", 1).strip()
+                
+    #             turns.append(output)
+    #             steps.append(int(step))
+    #             new_tokens.append(int(new_token))
+    #             wall_time.append(total_time)
+    #         except RuntimeError as e:
+    #             print("ERROR question ID: ", question["question_id"])
+    #             output = "ERROR"
+    #         conv.messages[-1][-1] = output
+    # print('Warmup done')
+
+    accept_lengths_tree = []
+    for chunk in tqdm(chunks(questions[:15], batch_size)):
+        choices = []
+        cur_accept_lengths_tree = []
         turns = []
         steps = []
         new_tokens = []
         wall_time = []
-        for j in range(len(question["turns"])):
-            qs = question["turns"][j]
-            conv.append_message(conv.roles[0], qs)
-            conv.append_message(conv.roles[1], None)
-            conv.stop_str = "</s>"
-            prompt = conv.get_prompt()
-            inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
-            input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
-            try:
-                torch.cuda.synchronize()
-                start_time = time.time()
-                output_ids, step, accept_length_tree = forward_func(
+        # for j in range(len(question["turns"][:1])):
+        j = 0
+        qs = [question["turns"][j] for question in chunk]
+
+        conv = [get_conversation_template("vicuna") for _ in chunk]
+        for i, el in enumerate(conv):
+            el.append_message(el.roles[0], qs[i])
+            el.append_message(el.roles[1], None)
+            el.stop_str = "</s>"
+        prompts = [el.get_prompt() for el in conv]
+        inputs = tokenizer(prompts,
+                            add_special_tokens=True,
+                            padding="longest", 
+                            return_attention_mask=True, 
+                            return_tensors="pt",
+                            padding_side="left"
+                            ).to(model.device)
+        input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
+        try:
+            # torch.cuda.synchronize()
+            output_ids, stats = generate_batched_func(
                     input_ids, attention_mask,
                     model,
                     tokenizer,
@@ -121,124 +207,55 @@ def get_model_answers(
                     # do_sample=do_sample,
                     # temperature=temperature,
                 )
-                new_token = output_ids[:, -1]
-                torch.cuda.synchronize()
-                total_time = time.time() - start_time
-                output_ids = output_ids[0][len(input_ids[0]):]
-                # be consistent with the template's stop_token_ids
-                if conv.stop_token_ids:
-                    stop_token_ids_index = [
-                        i
-                        for i, id in enumerate(output_ids)
-                        if id in conv.stop_token_ids
-                    ]
-                    if len(stop_token_ids_index) > 0:
-                        output_ids = output_ids[: stop_token_ids_index[0]]
+            # torch.cuda.synchronize()
 
-                output = tokenizer.decode(
-                    output_ids,
-                    spaces_between_special_tokens=False,
-                )
-                if conv.stop_str and output.find(conv.stop_str) > 0:
-                    output = output[: output.find(conv.stop_str)]
-                for special_token in tokenizer.special_tokens_map.values():
-                    if isinstance(special_token, list):
-                        for special_tok in special_token:
-                            output = output.replace(special_tok, "")
-                    else:
-                        output = output.replace(special_token, "")
-                output = output.strip()
+            stats.calculate_stats()
+            new_token = stats.mean_accept_per_sample + stats.steps
+            step = stats.steps
+            total_time = stats.wall_time
+            accept_length_tree = stats.accepted_length.tolist()
+            accept_lengths_tree.append(accept_length_tree)
+            output_ids = output_ids[0][len(input_ids[0]):]
 
-                if conv.name == "xgen" and output.startswith("Assistant:"):
-                    output = output.replace("Assistant:", "", 1).strip()
-                
-                turns.append(output)
-                steps.append(int(step))
-                new_tokens.append(int(new_token))
-                wall_time.append(total_time)
-            except RuntimeError as e:
-                print("ERROR question ID: ", question["question_id"])
-                output = "ERROR"
-            conv.messages[-1][-1] = output
-    print('Warmup done')
+            # if conv.stop_token_ids:
+            #     stop_token_ids_index = [
+            #         i
+            #         for i, id in enumerate(output_ids)
+            #         if id in conv.stop_token_ids
+            #     ]
+            #     if len(stop_token_ids_index) > 0:
+            #         output_ids = output_ids[: stop_token_ids_index[0]]
 
-    accept_lengths_tree = []
-    for question in tqdm(questions):
+            output = tokenizer.decode(
+                output_ids,
+                spaces_between_special_tokens=False,
+            )
+            # if conv.stop_str and output.find(conv.stop_str) > 0:
+            #     output = output[: output.find(conv.stop_str)]
+            for special_token in tokenizer.special_tokens_map.values():
+                if isinstance(special_token, list):
+                    for special_tok in special_token:
+                        output = output.replace(special_tok, "")
+                else:
+                    output = output.replace(special_token, "")
+            output = output.strip()
 
-        choices = []
-        for i in range(num_choices):
-            cur_accept_lengths_tree = []
-            torch.manual_seed(i)
-            conv = get_conversation_template("vicuna")
-            turns = []
-            steps = []
-            new_tokens = []
-            wall_time = []
-            for j in range(len(question["turns"])):
-                qs = question["turns"][j]
-                conv.append_message(conv.roles[0], qs)
-                conv.append_message(conv.roles[1], None)
-                conv.stop_str = "</s>"
-                prompt = conv.get_prompt()
-                inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
-                input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
-                try:
-                    torch.cuda.synchronize()
-                    start_time = time.time()
-                    output_ids, step, accept_length_tree = forward_func(
-                            input_ids, attention_mask,
-                            model,
-                            tokenizer,
-                            max_new_tokens,
-                            **kwargs,
-                            # drafter=drafter,
-                            # do_sample=do_sample,
-                            # temperature=temperature,
-                        )
-                    new_token = output_ids[:, -1]
-                    torch.cuda.synchronize()
-                    total_time = time.time() - start_time
-                    accept_lengths_tree.extend(accept_length_tree)
-                    output_ids = output_ids[0][len(input_ids[0]):]
-
-                    if conv.stop_token_ids:
-                        stop_token_ids_index = [
-                            i
-                            for i, id in enumerate(output_ids)
-                            if id in conv.stop_token_ids
-                        ]
-                        if len(stop_token_ids_index) > 0:
-                            output_ids = output_ids[: stop_token_ids_index[0]]
-
-                    output = tokenizer.decode(
-                        output_ids,
-                        spaces_between_special_tokens=False,
-                    )
-                    if conv.stop_str and output.find(conv.stop_str) > 0:
-                        output = output[: output.find(conv.stop_str)]
-                    for special_token in tokenizer.special_tokens_map.values():
-                        if isinstance(special_token, list):
-                            for special_tok in special_token:
-                                output = output.replace(special_tok, "")
-                        else:
-                            output = output.replace(special_token, "")
-                    output = output.strip()
-
-                    if conv.name == "xgen" and output.startswith("Assistant:"):
-                        output = output.replace("Assistant:", "", 1).strip()
-                    
-                    turns.append(output)
-                    steps.append(int(step))
-                    new_tokens.append(int(new_token))
-                    wall_time.append(total_time)
-                    cur_accept_lengths_tree.extend(accept_length_tree.tolist())
-                except RuntimeError as e:
-                    print("ERROR question ID: ", question["question_id"])
-                    output = "ERROR"
-                conv.messages[-1][-1] = output
-            # torch.cuda.empty_cache()
-            choices.append({"index": i, "turns": turns, "decoding_steps": steps, "new_tokens": new_tokens, "wall_time": wall_time,
-                            "accept_lengths": cur_accept_lengths_tree})
+            # if conv.name == "xgen" and output.startswith("Assistant:"):
+            #     output = output.replace("Assistant:", "", 1).strip()
+            
+            turns.append(output)
+            steps.append(step)
+            new_tokens.append(new_token)
+            wall_time.append(total_time)
+            cur_accept_lengths_tree.append(accept_length_tree)
+        except RuntimeError as e:
+            print("ERROR question ID: ", question["question_id"])
+            output = "ERROR"
+        for el in conv:
+            el.messages[-1][-1] = output
+        # torch.cuda.empty_cache()
+        choices.append({"index": i, "turns": turns, "decoding_steps": steps, "new_tokens": new_tokens, "wall_time": wall_time,
+                        "accept_lengths": cur_accept_lengths_tree})
 
         # Dump answers
         os.makedirs(os.path.dirname(answer_file), exist_ok=True)
@@ -251,8 +268,8 @@ def get_model_answers(
                 "choices": choices,
                 "tstamp": time.time(),
             }
-            fout.write(json.dumps(ans_json) + "\n")
-    print("#Mean accepted tokens: ", np.mean(accept_lengths_tree))
+            # fout.write(json.dumps(ans_json) + "\n")
+    print("#Mean accepted tokens: ", accept_lengths_tree)
 
 
 def reorg_answer_file(answer_file):

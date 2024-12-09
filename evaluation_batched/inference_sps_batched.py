@@ -5,14 +5,14 @@ python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fa
 """
 import argparse
 
-from evaluation.eval_batched import run_eval_batched, reorg_answer_file
+from evaluation_batched.eval_batched import run_eval_batched, reorg_answer_file
 
 from fastchat.utils import str_to_torch_dtype
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from model.sps.decoding import assisted_decoding
 
-from model.sps_batched.decoding_batched import sps_generate
+from model.sps_batched.decoding_batched import sps_batched_generate
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -92,6 +92,12 @@ if __name__ == "__main__":
         choices=["no", "4bit"],
         help="Bits and bytes quantization.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=2,
+        help="Batch size.",
+    )
     args = parser.parse_args()
 
     question_file = f"data/{args.bench_name}/question.jsonl"
@@ -112,7 +118,8 @@ if __name__ == "__main__":
         args.model_path,
         torch_dtype=str_to_torch_dtype(args.dtype),
         low_cpu_mem_usage=True,
-        quantization_config=model_quantization_config,
+        # quantization_config=model_quantization_config,
+        revision="main",
         device_map="auto"
     )
 
@@ -126,7 +133,7 @@ if __name__ == "__main__":
         args.drafter_path,
         torch_dtype=str_to_torch_dtype(args.dtype),
         low_cpu_mem_usage=True,
-        quantization_config=drafter_quantization_config,
+        # quantization_config=drafter_quantization_config,
         device_map="auto"
     )
 
@@ -152,7 +159,7 @@ if __name__ == "__main__":
     run_eval_batched(
         model=model,
         tokenizer=tokenizer,
-        forward_func=sps_generate,
+        generate_batched_func=sps_batched_generate,
         model_id=args.model_id,
         question_file=question_file,
         question_begin=args.question_begin,
@@ -165,7 +172,7 @@ if __name__ == "__main__":
         drafter=drafter,
         temperature=args.temperature,
         do_sample=do_sample,
-        batch_size=4,
+        batch_size=args.batch_size,
     )
 
     reorg_answer_file(answer_file)
