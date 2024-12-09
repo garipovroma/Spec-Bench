@@ -117,10 +117,11 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=str_to_torch_dtype(args.dtype),
-        low_cpu_mem_usage=True,
+        # low_cpu_mem_usage=True,
+        trust_remote_code=False,
         # quantization_config=model_quantization_config,
         revision="main",
-        device_map="auto"
+        device_map="auto",
     )
 
     if args.drafter_quantization == "no":
@@ -134,7 +135,7 @@ if __name__ == "__main__":
         torch_dtype=str_to_torch_dtype(args.dtype),
         low_cpu_mem_usage=True,
         # quantization_config=drafter_quantization_config,
-        device_map="auto"
+        device_map="auto",
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)

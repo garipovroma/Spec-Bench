@@ -16,6 +16,8 @@ from fastchat.llm_judge.common import load_questions
 from fastchat.model import get_conversation_template
 from tqdm import tqdm
 
+from model.utils.statistics import ExperimentStats
+
 def chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
@@ -86,15 +88,16 @@ def get_model_answers(
         batch_size,
         **kwargs,
 ):
-
+    device = model.device
+    print("Device:", device)
     model.eval()
     print('Check model training state:', model.training)
 
     cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     print('CUDA VISIBLE DEVICES:', cuda_visible_devices)
 
-    question = questions[0]
-
+    # question = questions[0]
     # warmup
     # for _ in range(3):
     #     torch.manual_seed(0)
@@ -169,21 +172,17 @@ def get_model_answers(
     #         conv.messages[-1][-1] = output
     # print('Warmup done')
 
-    accept_lengths_tree = []
-    for chunk in tqdm(chunks(questions[:15], batch_size)):
-        choices = []
-        cur_accept_lengths_tree = []
-        turns = []
-        steps = []
-        new_tokens = []
-        wall_time = []
+    exp_stats = ExperimentStats(batch_size)
+    for chunk in tqdm(chunks(questions[3:15], batch_size)):
+        # torch.cuda.empty_cache()
+        exp_stats.new_batch()
         # for j in range(len(question["turns"][:1])):
         j = 0
         qs = [question["turns"][j] for question in chunk]
 
         conv = [get_conversation_template("vicuna") for _ in chunk]
-        for i, el in enumerate(conv):
-            el.append_message(el.roles[0], qs[i])
+        for b, el in enumerate(conv):
+            el.append_message(el.roles[0], qs[b])
             el.append_message(el.roles[1], None)
             el.stop_str = "</s>"
         prompts = [el.get_prompt() for el in conv]
@@ -193,9 +192,10 @@ def get_model_answers(
                             return_attention_mask=True, 
                             return_tensors="pt",
                             padding_side="left"
-                            ).to(model.device)
+                            ).to(device)
         input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
         try:
+            
             # torch.cuda.synchronize()
             output_ids, stats = generate_batched_func(
                     input_ids, attention_mask,
@@ -203,19 +203,10 @@ def get_model_answers(
                     tokenizer,
                     max_new_tokens,
                     **kwargs,
-                    # drafter=drafter,
-                    # do_sample=do_sample,
-                    # temperature=temperature,
                 )
             # torch.cuda.synchronize()
 
-            stats.calculate_stats()
-            new_token = stats.mean_accept_per_sample + stats.steps
-            step = stats.steps
-            total_time = stats.wall_time
-            accept_length_tree = stats.accepted_length.tolist()
-            accept_lengths_tree.append(accept_length_tree)
-            output_ids = output_ids[0][len(input_ids[0]):]
+            output_ids = [output_ids[b][len(input_ids[0]):] for b in range(batch_size)]
 
             # if conv.stop_token_ids:
             #     stop_token_ids_index = [
@@ -226,50 +217,45 @@ def get_model_answers(
             #     if len(stop_token_ids_index) > 0:
             #         output_ids = output_ids[: stop_token_ids_index[0]]
 
-            output = tokenizer.decode(
-                output_ids,
+            output = [tokenizer.decode(
+                output_ids[b],
                 spaces_between_special_tokens=False,
-            )
+            ) for b in range(batch_size)]
             # if conv.stop_str and output.find(conv.stop_str) > 0:
             #     output = output[: output.find(conv.stop_str)]
-            for special_token in tokenizer.special_tokens_map.values():
-                if isinstance(special_token, list):
-                    for special_tok in special_token:
-                        output = output.replace(special_tok, "")
-                else:
-                    output = output.replace(special_token, "")
-            output = output.strip()
+            # for special_token in tokenizer.special_tokens_map.values():
+            #     if isinstance(special_token, list):
+            #         for special_tok in special_token:
+            #             output = output.replace(special_tok, "")
+            #     else:
+            #         output = output.replace(special_token, "")
+            # output = output.strip()
 
             # if conv.name == "xgen" and output.startswith("Assistant:"):
             #     output = output.replace("Assistant:", "", 1).strip()
-            
-            turns.append(output)
-            steps.append(step)
-            new_tokens.append(new_token)
-            wall_time.append(total_time)
-            cur_accept_lengths_tree.append(accept_length_tree)
+
         except RuntimeError as e:
-            print("ERROR question ID: ", question["question_id"])
-            output = "ERROR"
-        for el in conv:
-            el.messages[-1][-1] = output
-        # torch.cuda.empty_cache()
-        choices.append({"index": i, "turns": turns, "decoding_steps": steps, "new_tokens": new_tokens, "wall_time": wall_time,
-                        "accept_lengths": cur_accept_lengths_tree})
+            print("ERROR question IDs: ", [question["question_id"] for question in chunk], " : ", e)
+            output = [f"ERROR"] * batch_size
+            stats = None
+        for b, el in enumerate(conv):
+            el.messages[-1][-1] = output[b]
+        choices = exp_stats.update_exp_stats(stats, output, index=1)
 
         # Dump answers
-        os.makedirs(os.path.dirname(answer_file), exist_ok=True)
-        with open(os.path.expanduser(answer_file), "a") as fout:
-            ans_json = {
-                "question_id": question["question_id"],
-                "category": question["category"],
-                "answer_id": shortuuid.uuid(),
-                "model_id": model_id,
-                "choices": choices,
-                "tstamp": time.time(),
-            }
-            # fout.write(json.dumps(ans_json) + "\n")
-    print("#Mean accepted tokens: ", accept_lengths_tree)
+        for b, question in enumerate(chunk):
+            os.makedirs(os.path.dirname(answer_file), exist_ok=True)
+            with open(os.path.expanduser(answer_file), "a") as fout:
+                ans_json = {
+                    "question_id": question["question_id"],
+                    "category": question["category"],
+                    "answer_id": shortuuid.uuid(),
+                    "model_id": model_id,
+                    "choices": choices[b],
+                    "tstamp": time.time(),
+                }
+                fout.write(json.dumps(ans_json) + "\n")
+    print("#Mean accepted tokens per batch: ", exp_stats.get_total_accept_mean())
 
 
 def reorg_answer_file(answer_file):
