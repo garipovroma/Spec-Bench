@@ -2,6 +2,7 @@ import torch
 import time
 import os
 import numpy as np
+import shortuuid
 
 class BatchStats:
     """
@@ -24,7 +25,7 @@ class BatchStats:
         if self.start_time is None:
             assert "Timer is not started"
         self.end_time = time.time()
-        self.wall_time = self.start_time - self.end_time
+        self.wall_time =  self.end_time - self.start_time
     
     def add_accept(self, accepts: torch.tensor):
         self.accepted_length = torch.cat([self.accepted_length, accepts.cpu()], dim=-1)
@@ -63,14 +64,6 @@ class Choice:
         self.cur_accept_lengths_tree.append(cur_accept_lengths_tree)
     
     def __dict__(self):
-        # print({
-        #         "index": self.index,
-        #         "turns": self.turns,
-        #         "decoding_steps": self.steps,
-        #         "new_tokens": self.new_tokens,
-        #         "wall_time": self.wall_time,
-        #         "accept_lengths": self.cur_accept_lengths_tree
-        #         })
         return {
                 "index": self.index,
                 "turns": self.turns,
@@ -100,7 +93,7 @@ class ExperimentStats:
                             stats.steps[b].item(), 
                             stats.wall_time, 
                             accept_length_tree[b].tolist(),
-                            b,) 
+                            shortuuid.uuid(),) 
             self.accept_lengths_tree = torch.cat([self.accept_lengths_tree, accept_length_tree], dim=-1)
         return [ch.__dict__() for ch in self.choices]
     

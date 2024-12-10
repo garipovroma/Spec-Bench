@@ -173,8 +173,7 @@ def get_model_answers(
     # print('Warmup done')
 
     exp_stats = ExperimentStats(batch_size)
-    for chunk in tqdm(chunks(questions[3:15], batch_size)):
-        # torch.cuda.empty_cache()
+    for chunk in tqdm(chunks(questions, batch_size)):
         exp_stats.new_batch()
         # for j in range(len(question["turns"][:1])):
         j = 0
@@ -195,8 +194,8 @@ def get_model_answers(
                             ).to(device)
         input_ids, attention_mask = inputs.input_ids, inputs.attention_mask
         try:
-            
-            # torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             output_ids, stats = generate_batched_func(
                     input_ids, attention_mask,
                     model,
@@ -204,36 +203,38 @@ def get_model_answers(
                     max_new_tokens,
                     **kwargs,
                 )
-            # torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
-            output_ids = [output_ids[b][len(input_ids[0]):] for b in range(batch_size)]
+            output_ids = [output_ids[b][len(input_ids[b]):] for b in range(batch_size)]
 
-            # if conv.stop_token_ids:
-            #     stop_token_ids_index = [
-            #         i
-            #         for i, id in enumerate(output_ids)
-            #         if id in conv.stop_token_ids
-            #     ]
-            #     if len(stop_token_ids_index) > 0:
-            #         output_ids = output_ids[: stop_token_ids_index[0]]
+            for b, cv in enumerate(conv):
+                if cv.stop_token_ids:
+                    stop_token_ids_index = [
+                        i
+                        for i, id in enumerate(output_ids)
+                        if id in cv.stop_token_ids
+                    ]
+                    if len(stop_token_ids_index) > 0:
+                        output_ids[b] = output_ids[b][: stop_token_ids_index[b]]
 
             output = [tokenizer.decode(
                 output_ids[b],
                 spaces_between_special_tokens=False,
             ) for b in range(batch_size)]
-            # if conv.stop_str and output.find(conv.stop_str) > 0:
-            #     output = output[: output.find(conv.stop_str)]
-            # for special_token in tokenizer.special_tokens_map.values():
-            #     if isinstance(special_token, list):
-            #         for special_tok in special_token:
-            #             output = output.replace(special_tok, "")
-            #     else:
-            #         output = output.replace(special_token, "")
-            # output = output.strip()
 
-            # if conv.name == "xgen" and output.startswith("Assistant:"):
-            #     output = output.replace("Assistant:", "", 1).strip()
+            for b, cv in enumerate(conv):
+                if cv.stop_str and output[b].find(cv.stop_str) > 0:
+                    output[b] = output[b][: output[b].find(cv.stop_str)]
+                for special_token in tokenizer.special_tokens_map.values():
+                    if isinstance(special_token, list):
+                        for special_tok in special_token:
+                            output[b] = output[b].replace(special_tok, "")
+                    else:
+                        output[b] = output[b].replace(special_token, "")
+                output[b] = output[b].strip()
 
+                if cv.name == "xgen" and output[b].startswith("Assistant:"):
+                    output[b] = output[b].replace("Assistant:", "", 1).strip()
         except RuntimeError as e:
             print("ERROR question IDs: ", [question["question_id"] for question in chunk], " : ", e)
             output = [f"ERROR"] * batch_size
