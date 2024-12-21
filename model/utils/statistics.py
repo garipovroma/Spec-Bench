@@ -86,6 +86,7 @@ class ExperimentStats:
         if not stats is None:
             stats.calculate_stats()
             accept_length_tree = stats.accepted_length
+            b_id = shortuuid.uuid()
             for b, ch in enumerate(self.choices):
                 ch.append(  output[b],
                             index,
@@ -93,7 +94,7 @@ class ExperimentStats:
                             stats.steps[b].item(), 
                             stats.wall_time, 
                             accept_length_tree[b].tolist(),
-                            shortuuid.uuid(),) 
+                            b_id,) 
             self.accept_lengths_tree = torch.cat([self.accept_lengths_tree, accept_length_tree], dim=-1)
         return [ch.__dict__() for ch in self.choices]
     
