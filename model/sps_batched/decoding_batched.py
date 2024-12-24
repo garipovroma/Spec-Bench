@@ -101,17 +101,26 @@ def sps_batched_one_forward(
 def generate_with_pad(input_ids, attention_mask, model, do_sample=False, temperature=1, max_new_tokens=1, stop_on_eos=True):
     bs = input_ids.shape[0]
     logits = None
+    logits_res = None
+    if not do_sample:
+        temperature = 0
 
     for i in range(max_new_tokens):
         logits = model.forward(input_ids, attention_mask=attention_mask, position_ids=make_padded_pos_ids(attention_mask))["logits"]
-  
-        if do_sample:
-            logits = logits / temperature
-            probs = logits[:, -1].softmax(-1)
-            new_token = torch.multinomial(probs, 1).to(input_ids.device)
+        if logits_res is None:
+            logits_res = [logits]
         else:
-            new_token = logits[:, -1].argmax(-1, keepdim=True).to(input_ids.device)
-        
+            logits_res.append(logits[:, [-1]])
+    
+        probs = temperature_scaled_softmax(logits[:, -1], temperature=temperature, dim=-1)
+        # if do_sample:
+        #     logits = logits / temperature
+        #     probs = logits[:, -1].softmax(-1)
+        #     new_token = torch.multinomial(probs, 1).to(input_ids.device)
+        # else:
+        #     new_token = logits[:, -1].argmax(-1, keepdim=True).to(input_ids.device)
+        new_token = torch.multinomial(probs, 1).to(input_ids.device)
+
         input_ids = torch.cat([input_ids, new_token], dim=-1)
         attention_mask = torch.cat([attention_mask, torch.ones(bs, 1, device=attention_mask.device)], dim=-1)
 
@@ -119,7 +128,7 @@ def generate_with_pad(input_ids, attention_mask, model, do_sample=False, tempera
             break
 
     return {"sequences" : input_ids, 
-            "scores" : logits, 
+            "scores" : torch.cat(logits_res, dim=1), 
             "attention_mask" : attention_mask}
 
 
