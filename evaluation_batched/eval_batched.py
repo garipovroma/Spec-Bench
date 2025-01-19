@@ -252,7 +252,7 @@ def get_model_answers(
                     "category": question["category"],
                     "answer_id": shortuuid.uuid(),
                     "model_id": model_id,
-                    "choices": choices[b],
+                    "choices": [choices[b]],
                     "tstamp": time.time(),
                 }
                 fout.write(json.dumps(ans_json) + "\n")
